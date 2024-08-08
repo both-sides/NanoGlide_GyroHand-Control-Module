@@ -1,176 +1,169 @@
 #include <Wire.h>
 #include "I2Cdev.h"
 #include "MPU6050_6Axis_MotionApps20.h"
-// Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE implementationis used in I2Cdev.h
-
-
 #include <SoftwareSerial.h>
+
 SoftwareSerial BTSerial(10, 11); // CONNECT BT RX PIN TO ARDUINO 11 PIN | CONNECT BT TX PIN TO ARDUINO 10 PIN
 
-#define OUTPUT_READABLE_YAWPITCHROLL
-#define INTERRUPT_PIN 2// interrupt on D2
-#define LED_PIN 13
+constexpr uint8_t INTERRUPT_PIN = 2; // Interrupt on D2
+constexpr uint8_t LED_PIN = 13;
 
 MPU6050 mpu;
 bool blinkState = false;
 
-// MPU control/status vars
-bool dmpReady = false;  // set true if DMP init was successful
-uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
-uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
-uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
-uint16_t fifoCount;     // count of all bytes currently in FIFO
-uint8_t fifoBuffer[64]; // FIFO storage buffer
+bool dmpReady = false;
+uint8_t mpuIntStatus;
+uint8_t devStatus;
+uint16_t packetSize;
+uint16_t fifoCount;
+uint8_t fifoBuffer[64];
 
-// orientation/motion vars
-Quaternion q;           // [w, x, y, z]         quaternion container
-VectorFloat gravity;    // [x, y, z]            gravity vector
-float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
-float pitch = 0;
-float roll = 0;
-float yaw = 0;
-int x;
-int y;
+Quaternion q;
+VectorFloat gravity;
+float ypr[3];
 
-//INTERRUPT DETECTION ROUTINE           
-volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
-void dmpDataReady() {
+enum GestureState
+{
+  GESTURE_STOP = 'S',
+  GESTURE_FORWARD = 'F',
+  GESTURE_BACKWARD = 'B',
+  GESTURE_LEFT = 'L',
+  GESTURE_RIGHT = 'R'
+};
+
+constexpr float RAD_TO_DEG = 180.0 / M_PI;
+constexpr int16_t PITCH_YAW_THRESHOLD = 100;
+constexpr int16_t ROLL_MIN = 45;
+constexpr int16_t ROLL_MAX = 55;
+constexpr int16_t PITCH_MIN = 145;
+constexpr int16_t PITCH_MAX = 155;
+
+volatile bool mpuInterrupt = false;
+
+void dmpDataReady()
+{
   mpuInterrupt = true;
 }
 
-//INITIAL SETUP 
+constexpr int mapGestureValue(float value, int fromLow, int fromHigh, int toLow, int toHigh)
+{
+  return static_cast<int>((value - fromLow) * (toHigh - toLow) / (fromHigh - fromLow) + toLow);
+}
 
+void sendGestureCommand(GestureState gesture)
+{
+  BTSerial.write(static_cast<uint8_t>(gesture));
+}
 
-void setup() {
+void setup()
+{
   Fastwire::setup(400, true);
 
-
-  // initialize serial communication
   Serial.begin(38400);
-  BTSerial.begin(38400);  // HC-05 default speed in AT command mode
-  
-  while (!Serial); 
+  BTSerial.begin(38400);
 
-  // initialize device
+  while (!Serial)
+    ;
+
   Serial.println(F("Initializing I2C devices..."));
   mpu.initialize();
   pinMode(INTERRUPT_PIN, INPUT);
 
-  // verify connection
   Serial.println(F("Testing device connections..."));
   Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
 
-  // load and configure the DMP
   Serial.println(F("Initializing DMP..."));
   devStatus = mpu.dmpInitialize();
 
-  // gyro offsets, scaled for min sensitivity
   mpu.setXGyroOffset(126);
   mpu.setYGyroOffset(57);
   mpu.setZGyroOffset(-69);
-  mpu.setZAccelOffset(1869); 
+  mpu.setZAccelOffset(1869);
 
-  // making sure it worked (returns 0 if so)
-  if (devStatus == 0) {
-    // turn on the DMP, now that it's ready
+  if (devStatus == 0)
+  {
     Serial.println(F("Enabling DMP..."));
     mpu.setDMPEnabled(true);
 
-    // enable Arduino interrupt detection
     Serial.println(F("Enabling interrupt detection (Arduino external interrupt 0)..."));
     attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN), dmpDataReady, RISING);
     mpuIntStatus = mpu.getIntStatus();
 
-    // setting our DMP Ready flag so the main loop() function knows it's okay to use it
     Serial.println(F("DMP ready! Waiting for first interrupt..."));
     dmpReady = true;
-
-    // get expected DMP packet size for later comparison
     packetSize = mpu.dmpGetFIFOPacketSize();
-  } else {
-    // ERROR!
-    // 1 = initial memory load failed
-    // 2 = DMP configuration updates failed
-    // (if it's going to break, usually the code will be 1)
+  }
+  else
+  {
     Serial.print(F("DMP Initialization failed (code "));
     Serial.print(devStatus);
     Serial.println(F(")"));
   }
 
-  // configure LED for output
   pinMode(LED_PIN, OUTPUT);
 }
 
+void loop()
+{
+  if (!dmpReady)
+    return;
 
-// MAIN PROGRAM LOOP 
-
-
-void loop() {
-  if (!dmpReady) return;
-
-  // wait for MPU interrupt or extra packet(s) available
-  while (!mpuInterrupt && fifoCount < packetSize) {
+  while (!mpuInterrupt && fifoCount < packetSize)
+  {
   }
 
-  // reset interrupt flag and get INT_STATUS byte
   mpuInterrupt = false;
   mpuIntStatus = mpu.getIntStatus();
-
-  // get current FIFO count
   fifoCount = mpu.getFIFOCount();
 
-  // check for overflow (this should never happen unless the code is too inefficient)
-  if ((mpuIntStatus & 0x10) || fifoCount == 1024) {
-    // resets so we can continue cleanly
+  if ((mpuIntStatus & 0x10) || fifoCount == 1024)
+  {
     mpu.resetFIFO();
     Serial.println(F("FIFO overflow!"));
-
-    // otherwise, checks for DMP data ready interrupt (this should happen frequently)
-  } else if (mpuIntStatus & 0x02) {
-    // waiting for correct available data length
-    while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
-
-    // read a packet from FIFO
+  }
+  else if (mpuIntStatus & 0x02)
+  {
+    while (fifoCount < packetSize)
+      fifoCount = mpu.getFIFOCount();
     mpu.getFIFOBytes(fifoBuffer, packetSize);
-
-    // track FIFO count here in case there is > 1 packet available
-    // (this allows reading more immediately without waiting for an interrupt)
     fifoCount -= packetSize;
 
-#ifdef OUTPUT_READABLE_YAWPITCHROLL
-    // display Euler angles in degrees
     mpu.dmpGetQuaternion(&q, fifoBuffer);
     mpu.dmpGetGravity(&gravity, &q);
     mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
 
-    yaw = ypr[0] * 180 / M_PI;
-    pitch = ypr[1] * 180 / M_PI;
-    roll = ypr[2] * 180 / M_PI;
+    float yaw = ypr[0] * RAD_TO_DEG;
+    float pitch = ypr[1] * RAD_TO_DEG;
+    float roll = ypr[2] * RAD_TO_DEG;
 
-    if (roll > -100 && roll < 100)
-      x = map (roll, -100, 100, 0, 100);
+    int mappedRoll = mapGestureValue(roll, -PITCH_YAW_THRESHOLD, PITCH_YAW_THRESHOLD, 0, 100);
+    int mappedPitch = mapGestureValue(pitch, -PITCH_YAW_THRESHOLD, PITCH_YAW_THRESHOLD, 100, 200);
 
-    if (pitch > -100 && pitch < 100)
-      y = map (pitch, -100, 100, 100, 200);
-
-    Serial.print(x);
+    Serial.print(mappedRoll);
     Serial.print("\t");
-    Serial.println(y);
+    Serial.println(mappedPitch);
 
-    if((x>=45 && x<=55) && (y>=145 && y <=155)){
-      BTSerial.write('S');
-    }else if(x>60){
-      BTSerial.write('R');
-    }else if(x<40){
-      BTSerial.write('L');
-    }else if(y>160){
-      BTSerial.write('B');
-    }else if(y<140){
-      BTSerial.write('F');
+    if (mappedRoll >= ROLL_MIN && mappedRoll <= ROLL_MAX && mappedPitch >= PITCH_MIN && mappedPitch <= PITCH_MAX)
+    {
+      sendGestureCommand(GESTURE_STOP);
     }
-#endif
+    else if (mappedRoll > ROLL_MAX)
+    {
+      sendGestureCommand(GESTURE_RIGHT);
+    }
+    else if (mappedRoll < ROLL_MIN)
+    {
+      sendGestureCommand(GESTURE_LEFT);
+    }
+    else if (mappedPitch > PITCH_MAX)
+    {
+      sendGestureCommand(GESTURE_BACKWARD);
+    }
+    else if (mappedPitch < PITCH_MIN)
+    {
+      sendGestureCommand(GESTURE_FORWARD);
+    }
 
-    // blink LED to indicate activity
     blinkState = !blinkState;
     digitalWrite(LED_PIN, blinkState);
   }
